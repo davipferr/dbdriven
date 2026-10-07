@@ -1,0 +1,50 @@
+services:
+  # PostgreSQL: holds ALL the business logic (see ./db/init/*.sql).
+  # The scripts in ./db/init run only once, when the data volume is empty.
+  # To re-run them: docker compose down -v && docker compose up --build
+  db:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: postgres
+      POSTGRES_DB: app
+    ports:
+      - "5432:5432" # exposed so you can explore with psql / DBeaver / pgAdmin
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+      - ./db/init:/docker-entrypoint-initdb.d:ro
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres -d app"]
+      interval: 2s
+      timeout: 3s
+      retries: 30
+
+  # Thin HTTP gateway: translates HTTP -> SQL function calls. No business logic.
+  api:
+    build: ./api
+    environment:
+      # Logs in as app_api, a low-privilege role (created in db/init/00_setup.sql)
+      DATABASE_URL: postgres://app_api:app_api_dev_password@db:5432/app
+      PORT: 4000
+    ports:
+      - "4000:4000"
+    volumes:
+      - ./api/src:/app/src # live reload via `node --watch`
+    depends_on:
+      db:
+        condition: service_healthy
+    restart: unless-stopped
+
+  # React (Vite dev server). Proxies /api/* to the api service.
+  web:
+    build: ./web
+    ports:
+      - "5173:5173"
+    volumes:
+      - ./web:/app
+      - /app/node_modules # keep the container's node_modules, not the host's
+    depends_on:
+      - api
+
+volumes:
+  pgdata:

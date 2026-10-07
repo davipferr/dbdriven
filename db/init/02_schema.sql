@@ -1,0 +1,46 @@
+-- =============================================================================
+-- 02_schema.sql: tables, constraints and Row Level Security
+-- =============================================================================
+
+create table app.users (
+  id            uuid primary key default gen_random_uuid(),
+  email         text not null unique
+                check (email = lower(email) and email ~ '^[^@\s]+@[^@\s]+\.[^@\s]+$'),
+  password_hash text not null,
+  created_at    timestamptz not null default now()
+);
+
+create table app.todos (
+  id           bigint generated always as identity primary key,
+  -- The owner is filled in automatically from the token, so the client can't lie about it.
+  user_id      uuid not null default auth.uid() references app.users (id) on delete cascade,
+  title        text not null check (length(trim(title)) between 1 and 200),
+  done         boolean not null default false,
+  completed_at timestamptz,
+  created_at   timestamptz not null default now(),
+  updated_at   timestamptz not null default now()
+);
+
+create index on app.todos (user_id);
+
+-- -----------------------------------------------------------------------------
+-- Row Level Security (RLS)
+--
+-- With RLS on, every SELECT/INSERT/UPDATE/DELETE on app.todos from a non-owner
+-- role (like app_api) is silently filtered by the policies below:
+--   USING      -> which existing rows you can see / update / delete
+--   WITH CHECK -> which rows you're allowed to write
+-- So `select * from app.todos` only returns YOUR todos. The query doesn't need
+-- a WHERE clause, and a bug in a query can't leak other users' data.
+--
+-- `(select auth.uid())` rather than `auth.uid()` makes Postgres evaluate it once
+-- per query instead of once per row (a common RLS performance trick).
+-- -----------------------------------------------------------------------------
+alter table app.todos enable row level security;
+
+create policy todos_owner_only on app.todos
+  using      (user_id = (select auth.uid()))
+  with check (user_id = (select auth.uid()));
+
+-- Note: app.users has NO grants for app_api at all (see 04_api.sql). Password
+-- hashes are only reachable through SECURITY DEFINER functions like api.login.
