@@ -41,6 +41,7 @@ docker compose down -v
 | Queries / mutations   | Functions in the `api` schema                             | `db/init/04_api.sql` |
 | Realtime              | Trigger → `pg_notify` → backend `LISTEN` → SSE → browser   | `03_rules.sql`, `api/src/server.js` |
 | Background jobs       | `app.jobs` + `SKIP LOCKED` workers, leases, retries        | `db/init/05_jobs.sql`, `worker/` |
+| User-built queries    | JSON AST → whitelisted dynamic SQL, then RLS              | `db/init/04_api.sql` (`api.run_query`) |
 
 ## Life of a request: adding a todo
 
@@ -162,6 +163,65 @@ from app.jobs where status = 'running';
 begin;
 select id from app.jobs where status = 'queued' order by id limit 3 for update skip locked;
 ```
+
+## Query builder: running user-built queries safely
+
+The **Query** tab builds a query by clicking: pick columns, add filters
+(`done = false`, `title ilike '%buy%'`), choose a sort and a limit. You see the SQL
+change live, and the results update as you go.
+
+The browser **never sends SQL**. It sends a JSON description of the query (an AST),
+and `api.run_query` rebuilds the SQL from it inside Postgres. The gateway didn't
+change: `POST /api/rpc/run_query` is just another RPC.
+
+```
+React builder ── JSON AST ──► api (unchanged) ──► api.run_query(args)
+  live SQL preview                                 1. check the AST against the whitelist
+  (display only)  ◄────────── { sql, rows } ─────  2. build SQL with format(%I, %L)
+                                                   3. execute as app_api: RLS filters rows
+```
+
+```json
+{ "from": "todos",
+  "select": ["id", "title", "created_at"],
+  "where": [{ "column": "done",  "op": "=",     "value": "false" },
+            { "column": "title", "op": "ilike", "value": "%buy%" }],
+  "orderBy": { "column": "created_at", "dir": "desc" },
+  "limit": 20 }
+```
+
+| Piece | What it does | Where |
+|---|---|---|
+| The whitelist, as data | Queryable columns, their types, and allowed operators per column. The UI's dropdowns are built from it too. | `api.query_schema` |
+| JSON → SQL (the real one) | Checks every name and operator against the whitelist, then builds the SQL | `api.run_query` |
+| JSON → SQL (the preview) | Pretty-prints the same AST. **Never executed.** | `web/src/queryToSql.js` |
+| `%I` | Quotes an identifier: `title; drop table x` would be *one* weird name | `format()` |
+| `%L` + `::type` | Quotes a value as one literal, cast to the column's type | `format()` |
+| `%s` | Raw text, only for things *we* chose: whitelisted operators, `asc`/`desc`, an int limit | `format()` |
+| RLS + GRANTs | `SECURITY INVOKER`, so even a buggy builder only sees your todos; `app.users` isn't granted at all | `02_schema.sql`, `04_api.sql` |
+
+Two independent locks: the **whitelist** decides what *shape* of query is allowed,
+and **RLS + GRANTs** decide which *rows and tables* are reachable. Columns that aren't
+listed (like `user_id`) can't be selected, filtered or sorted on.
+
+A subtle one: `if not v_columns ? c` would let a JSON `null` column through,
+because `jsonb ? NULL` is NULL and `if NULL` counts as false. That's why the checks
+are written `if (check) is not true`. (The same trap applies to `c <> all(allowed)`.)
+
+The **Try to break it** panel sends hand-written ASTs that skip the dropdowns, the
+way an attacker with curl would: injection through a column name, the operator, a
+value, or the sort direction, reading `app.users`, or asking for a million rows.
+
+```bash
+# The same from a terminal (paste a token from the browser's localStorage):
+curl -s localhost:4000/api/rpc/run_query -H "authorization: Bearer $TOKEN"   -H 'content-type: application/json' -d '{"select":["password_hash"]}'
+# {"error":"Unknown column: password_hash","code":"22023"}
+```
+
+Next steps: a visual node editor (React Flow) that edits the same AST, a second
+table for `JOIN`s and `GROUP BY`/`count()`, an **Explain** button (`EXPLAIN` to see
+whether the `user_id` index is used), and building the whitelist from
+`information_schema.columns`.
 
 ## Exercises to deepen understanding
 

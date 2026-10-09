@@ -107,3 +107,41 @@ header button.link { margin-top: 0; margin-left: 8px; }
   .detail { grid-template-columns: 1fr; }
   .jobs-table th:nth-child(5), .jobs-table td:nth-child(5) { display: none; }
 }
+
+/* ---------- Query builder ---------- */
+.qb { display: grid; gap: 20px; }
+.qb h2 { font-size: 0.95rem; margin: 0 0 8px; }
+.qb h2 .muted { font-weight: 400; font-size: 0.85em; }
+.qb h3 { font-size: 0.8rem; margin: 0 0 6px; color: #57606a; text-transform: uppercase; letter-spacing: 0.04em; }
+.qb h3 .muted { text-transform: none; letter-spacing: 0; font-weight: 400; }
+.qb input, .qb select { padding: 6px 8px; border: 1px solid #d0d7de; border-radius: 6px; font: inherit; background: #fff; }
+.qb select:disabled { color: #57606a; background: #f6f8fa; }
+.qb pre { margin: 0; padding: 10px 12px; background: #f6f8fa; border: 1px solid #eaeef2; border-radius: 6px; font-size: 0.8rem; overflow: auto; }
+.qb pre.sql { background: #0f172a; color: #e2e8f0; border-color: #0f172a; font-size: 0.85rem; }
+.qb button.link { margin: 0; }
+.qb button:disabled { opacity: 0.5; cursor: default; }
+
+.qb-top { display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 1fr); gap: 20px; }
+.qb-builder { display: grid; gap: 16px; align-content: start; padding: 12px; background: #f6f8fa; border-radius: 8px; }
+.qb-code { display: grid; gap: 16px; align-content: start; }
+.qb-columns { display: flex; flex-wrap: wrap; gap: 6px; }
+.qb-columns .chip { display: inline-flex; align-items: center; cursor: pointer; background: #fff; border: 1px solid #d0d7de; }
+.qb-columns .chip.active { background: #eef2ff; color: #2563eb; border-color: #2563eb; }
+.qb-columns input { position: absolute; opacity: 0; pointer-events: none; }
+.qb-filter { display: flex; gap: 6px; align-items: center; margin-bottom: 6px; }
+.qb-filter input { flex: 1; min-width: 0; }
+.qb-inline { display: flex; gap: 24px; flex-wrap: wrap; }
+.qb-inline select + select { margin-left: 6px; }
+.qb-inline input[type="number"] { width: 80px; }
+
+.qb-server-sql { display: grid; gap: 4px; margin: 0 0 8px; font-size: 0.85rem; }
+.qb-server-sql code { padding: 6px 8px; background: #f6f8fa; border-radius: 6px; overflow-wrap: anywhere; }
+.qb-results { overflow-x: auto; }
+.qb-attacks td { vertical-align: top; }
+.qb-attacks td:first-child { white-space: nowrap; }
+.qb-attacks td button.link { padding: 0; text-align: left; }
+.qb-attacks code { font-size: 0.8em; overflow-wrap: anywhere; }
+@media (max-width: 760px) {
+  .qb-top { grid-template-columns: 1fr; }
+  .qb-attacks th:nth-child(2), .qb-attacks td:nth-child(2) { display: none; }
+}

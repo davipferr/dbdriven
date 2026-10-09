@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useState } from "react";
 import { rpc, subscribe } from "./api.js";
 import Jobs from "./Jobs.jsx";
+import QueryBuilder from "./QueryBuilder.jsx";
 
 const TOKEN_KEY = "dbdriven.token";
 
@@ -30,22 +31,21 @@ export default function App() {
   if (!user) return <main className="card">Loading…</main>;
 
   return (
-    <main className={tab === "jobs" ? "card wide" : "card"}>
+    <main className={tab === "todos" ? "card" : "card wide"}>
       <header>
         <nav className="tabs">
           <button className={tab === "todos" ? "active" : ""} onClick={() => setTab("todos")}>Todos</button>
           <button className={tab === "jobs" ? "active" : ""} onClick={() => setTab("jobs")}>Jobs</button>
+          <button className={tab === "query" ? "active" : ""} onClick={() => setTab("query")}>Query</button>
         </nav>
         <span>
           <span className="muted">{user.email}</span>
           <button className="link" onClick={logout}>Log out</button>
         </span>
       </header>
-      {tab === "todos" ? (
-        <Todos token={token} onUnauthorized={logout} />
-      ) : (
-        <Jobs token={token} onUnauthorized={logout} />
-      )}
+      {tab === "todos" && <Todos token={token} onUnauthorized={logout} />}
+      {tab === "jobs" && <Jobs token={token} onUnauthorized={logout} />}
+      {tab === "query" && <QueryBuilder token={token} onUnauthorized={logout} />}
     </main>
   );
 }
