@@ -132,11 +132,52 @@ function Todos({ token, onUnauthorized }) {
               <input type="checkbox" checked={t.done} onChange={() => call("set_todo_done", { id: t.id, done: !t.done })} />
               {t.title}
             </label>
+            <TodoTags todo={t} call={call} />
             <button className="link" onClick={() => call("delete_todo", { id: t.id })}>✕</button>
           </li>
         ))}
       </ul>
       {todos.length === 0 && <p className="muted">Nothing yet. Add your first todo.</p>}
     </>
+  );
+}
+
+// Tag chips + an inline "+ tag" input. No local state for the tags themselves:
+// the todo_tags NOTIFY trigger -> SSE -> reload() brings the new list.
+function TodoTags({ todo, call }) {
+  const [adding, setAdding] = useState(false);
+  const [tag, setTag] = useState("");
+
+  async function submit(e) {
+    e.preventDefault();
+    if (await call("tag_todo", { id: todo.id, tag })) {
+      setTag("");
+      setAdding(false);
+    }
+  }
+
+  return (
+    <span className="tags">
+      {todo.tags.map((name) => (
+        <span key={name} className="tag">
+          #{name}
+          <button className="link" title={`Remove #${name}`} onClick={() => call("untag_todo", { id: todo.id, tag: name })}>×</button>
+        </span>
+      ))}
+      {adding ? (
+        <form onSubmit={submit}>
+          <input
+            autoFocus
+            placeholder="tag"
+            value={tag}
+            onChange={(e) => setTag(e.target.value)}
+            onKeyDown={(e) => e.key === "Escape" && setAdding(false)}
+            onBlur={() => !tag && setAdding(false)}
+          />
+        </form>
+      ) : (
+        <button className="link add-tag" onClick={() => setAdding(true)}>+ tag</button>
+      )}
+    </span>
   );
 }

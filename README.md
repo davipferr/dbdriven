@@ -41,7 +41,8 @@ docker compose down -v
 | Queries / mutations   | Functions in the `api` schema                             | `db/init/04_api.sql` |
 | Realtime              | Trigger → `pg_notify` → backend `LISTEN` → SSE → browser   | `03_rules.sql`, `api/src/server.js` |
 | Background jobs       | `app.jobs` + `SKIP LOCKED` workers, leases, retries        | `db/init/05_jobs.sql`, `worker/` |
-| User-built queries    | JSON AST → whitelisted dynamic SQL, then RLS              | `db/init/04_api.sql` (`api.run_query`) |
+| Tags (many-to-many)   | `app.tags` + `app.todo_tags`, same-owner composite FKs     | `db/init/02_schema.sql` |
+| User-built queries    | JSON AST → whitelisted dynamic SQL, then RLS              | `db/init/06_query_builder.sql` |
 
 ## Life of a request: adding a todo
 
@@ -166,62 +167,129 @@ select id from app.jobs where status = 'queued' order by id limit 3 for update s
 
 ## Query builder: running user-built queries safely
 
-The **Query** tab builds a query by clicking: pick columns, add filters
-(`done = false`, `title ilike '%buy%'`), choose a sort and a limit. You see the SQL
-change live, and the results update as you go.
+The **Query** tab builds a query by clicking: pick columns, join tags, add filters
+(`done = false`, `title ilike '%buy%'`), group and count, sort, limit. You see the SQL
+change live, the results update as you go, and **Explain** shows how Postgres ran it.
+The preset buttons at the top walk through the main ideas.
 
 The browser **never sends SQL**. It sends a JSON description of the query (an AST),
-and `api.run_query` rebuilds the SQL from it inside Postgres. The gateway didn't
-change: `POST /api/rpc/run_query` is just another RPC.
+and `qb.build` rebuilds the SQL from it inside Postgres. The gateway didn't change:
+`run_query` and `explain_query` are just more RPCs.
 
 ```
-React builder ── JSON AST ──► api (unchanged) ──► api.run_query(args)
-  live SQL preview                                 1. check the AST against the whitelist
-  (display only)  ◄────────── { sql, rows } ─────  2. build SQL with format(%I, %L)
-                                                   3. execute as app_api: RLS filters rows
+React builder ── JSON AST ──► api (unchanged) ──► api.run_query / api.explain_query
+  live SQL preview                                  └─ qb.build(ast)
+  (display only)  ◄──── { sql, columns, rows } ────    1. check it against qb.schema()
+                         or { sql, plan }               2. build SQL with format(%I, %L)
+                                                    3. execute as app_api: RLS filters rows
 ```
 
 ```json
-{ "from": "todos",
-  "select": ["id", "title", "created_at"],
-  "where": [{ "column": "done",  "op": "=",     "value": "false" },
-            { "column": "title", "op": "ilike", "value": "%buy%" }],
-  "orderBy": { "column": "created_at", "dir": "desc" },
-  "limit": 20 }
+{ "from":    "todos",
+  "join":    { "table": "tags", "type": "inner" },
+  "select":  ["tags.name", { "fn": "count", "column": "*" }],
+  "where":   [{ "column": "todos.done", "op": "=", "value": "false" }],
+  "groupBy": ["tags.name"],
+  "orderBy": { "fn": "count", "column": "*", "dir": "desc" },
+  "limit":   20 }
 ```
 
 | Piece | What it does | Where |
 |---|---|---|
-| The whitelist, as data | Queryable columns, their types, and allowed operators per column. The UI's dropdowns are built from it too. | `api.query_schema` |
-| JSON → SQL (the real one) | Checks every name and operator against the whitelist, then builds the SQL | `api.run_query` |
+| The whitelist, as data | Tables, columns and types, operators per column, joins, aggregates. The UI's dropdowns come from it too. | `qb.schema()` |
+| JSON → SQL (the real one) | Checks every name against the whitelist, builds the SQL, runs nothing | `qb.build` |
 | JSON → SQL (the preview) | Pretty-prints the same AST. **Never executed.** | `web/src/queryToSql.js` |
 | `%I` | Quotes an identifier: `title; drop table x` would be *one* weird name | `format()` |
 | `%L` + `::type` | Quotes a value as one literal, cast to the column's type | `format()` |
-| `%s` | Raw text, only for things *we* chose: whitelisted operators, `asc`/`desc`, an int limit | `format()` |
-| RLS + GRANTs | `SECURITY INVOKER`, so even a buggy builder only sees your todos; `app.users` isn't granted at all | `02_schema.sql`, `04_api.sql` |
+| `%s` | Raw text, only for things *we* wrote: operators, types, aggregate names, join conditions from `qb.schema()` | `format()` |
+| Joins by name | The client asks for `"tags"`; the `ON` conditions live in `qb.schema()` | `qb.build` |
+| Unknown keys rejected | `{"join": {"table": "tags", "on": "true"}}` fails instead of being ignored | `qb.check_keys` |
+| RLS + GRANTs | `SECURITY INVOKER`, so even a buggy builder only sees your rows, in every joined table; `app.users` isn't granted at all | `02_schema.sql`, `04_api.sql` |
 
 Two independent locks: the **whitelist** decides what *shape* of query is allowed,
 and **RLS + GRANTs** decide which *rows and tables* are reachable. Columns that aren't
-listed (like `user_id`) can't be selected, filtered or sorted on.
+listed (like `user_id`) can't be selected, filtered, grouped or sorted on.
 
-A subtle one: `if not v_columns ? c` would let a JSON `null` column through,
-because `jsonb ? NULL` is NULL and `if NULL` counts as false. That's why the checks
-are written `if (check) is not true`. (The same trap applies to `c <> all(allowed)`.)
+Two subtle traps, both hit while building this:
+
+- `if not v_columns ? c` lets a JSON `null` column through, because `jsonb ? NULL`
+  is NULL and `if NULL` counts as false. So the checks read `if (check) is not true`.
+- `args->'orderBy' - 'dir'` parses as `args -> ('orderBy' - 'dir')`, because in
+  Postgres `-` binds tighter than `->`. It needs parentheses.
+
+### Tags, JOINs and GROUP BY
+
+Add tags to todos in the Todos tab (`+ tag`). A todo can have many tags and a tag can
+be on many todos, so the links live in a third table, `app.todo_tags`:
+
+```
+app.todos ──< app.todo_tags >── app.tags
+   id    ◄──── todo_id
+                tag_id   ────►   id
+```
+
+`todo_tags` has **composite foreign keys**, `(todo_id, user_id) → todos (id, user_id)`
+and the same for tags, so a link can only join a todo and a tag of the *same* user.
+Foreign key checks ignore RLS, so with a plain `todo_id → todos (id)` you could tag
+someone else's todo just by guessing its id.
+
+The presets show the ideas:
+
+| Preset | Teaches |
+|---|---|
+| Open todos per tag | `JOIN` through the link table, then `GROUP BY`: one row per tag, not per todo |
+| Todos without tags | `LEFT JOIN` keeps todos with no match; their `tags.*` come back NULL |
+| count(*) vs count(tags.id) | `count(*)` counts rows, `count(col)` skips NULLs: an untagged todo is 1 row but 0 tags |
+| Newest todo per tag | `max()` inside each group |
+
+In a grouped query every plain column must be in `GROUP BY` (what would "the title"
+mean when one row stands for five todos?). `qb.build` checks this itself, so you get
+a clear 400 instead of Postgres' error `42803`.
+
+Results come back as arrays (`rows: [["home", 2]]`) next to a `columns` list, not as
+objects: with a join, `todos.id` and `tags.id` are both called `id`, and in a JSON
+object one would overwrite the other.
+
+### Explain: did Postgres use the index?
+
+**Explain** runs `EXPLAIN (ANALYZE, FORMAT JSON)` on the same SQL `qb.build` produced,
+and draws the plan as a tree with estimated vs. actual rows. A few things to notice:
+
+- The RLS policy shows up as `user_id = $0`, and `$0` comes from an `InitPlan`:
+  that's `(select auth.uid())` from the policy, evaluated once per query.
+- With only your own todos you'll see a **Seq Scan**. That's correct: for a table of
+  one page, reading it all is cheaper than visiting an index first.
+- **Seed 20,000 rows from 200 other users** (`api.seed_demo_data`) and explain again:
+  now it's a **Bitmap Index Scan on `todos_user_id_idx`**. Postgres estimates
+  `user_id = $0` as *rows ÷ distinct users* (20,006 ÷ 201 ≈ 99), so it's the number
+  of *users*, not just the number of rows, that makes the index worth it. RLS still
+  hides those rows from you; `count(*)` still says 5.
+- **Discourage sequential scans** runs the query with `enable_seqscan = off`, which
+  makes seq scans look absurdly expensive, so you can compare both plans' costs.
+- **Remove them** deletes the demo rows, but Postgres may keep using the index for a
+  minute: deleted rows stay as *dead tuples* until autovacuum runs, and the table is
+  still ~230 pages for 6 live rows. Watch the page count drop, then explain again.
+- RLS doesn't apply to planner statistics: the estimates reveal roughly how many rows
+  *other* users have. A known side channel, and one reason not to expose `EXPLAIN`
+  in production.
+
+### Try to break it
 
 The **Try to break it** panel sends hand-written ASTs that skip the dropdowns, the
 way an attacker with curl would: injection through a column name, the operator, a
-value, or the sort direction, reading `app.users`, or asking for a million rows.
+value or the sort direction, reading or joining `app.users`, writing your own `ON`
+condition, calling `pg_sleep` as an "aggregate", or asking for a million rows.
 
 ```bash
 # The same from a terminal (paste a token from the browser's localStorage):
-curl -s localhost:4000/api/rpc/run_query -H "authorization: Bearer $TOKEN"   -H 'content-type: application/json' -d '{"select":["password_hash"]}'
-# {"error":"Unknown column: password_hash","code":"22023"}
+curl -s localhost:4000/api/rpc/run_query -H "authorization: Bearer $TOKEN" \
+  -H 'content-type: application/json' -d '{"select":["todos.password_hash"]}'
+# {"error":"Unknown column: todos.password_hash","code":"22023"}
 ```
 
-Next steps: a visual node editor (React Flow) that edits the same AST, a second
-table for `JOIN`s and `GROUP BY`/`count()`, an **Explain** button (`EXPLAIN` to see
-whether the `user_id` index is used), and building the whitelist from
-`information_schema.columns`.
+Ideas for later: `HAVING` (filter on an aggregate, like "tags with more than 2 open
+todos"), a visual node editor (React Flow) over the same AST, and building
+`qb.schema()` from `information_schema.columns`.
 
 ## Exercises to deepen understanding
 

@@ -120,23 +120,45 @@ header button.link { margin-top: 0; margin-left: 8px; }
 .qb pre.sql { background: #0f172a; color: #e2e8f0; border-color: #0f172a; font-size: 0.85rem; }
 .qb button.link { margin: 0; }
 .qb button:disabled { opacity: 0.5; cursor: default; }
+.qb .hint { margin: 0; font-size: 0.85rem; }
 
+.qb-presets { display: flex; flex-wrap: wrap; gap: 6px; align-items: center; }
+.qb-presets .hint { flex-basis: 100%; }
 .qb-top { display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 1fr); gap: 20px; }
 .qb-builder { display: grid; gap: 16px; align-content: start; padding: 12px; background: #f6f8fa; border-radius: 8px; }
 .qb-code { display: grid; gap: 16px; align-content: start; }
-.qb-columns { display: flex; flex-wrap: wrap; gap: 6px; }
-.qb-columns .chip { display: inline-flex; align-items: center; cursor: pointer; background: #fff; border: 1px solid #d0d7de; }
-.qb-columns .chip.active { background: #eef2ff; color: #2563eb; border-color: #2563eb; }
-.qb-columns input { position: absolute; opacity: 0; pointer-events: none; }
-.qb-filter { display: flex; gap: 6px; align-items: center; margin-bottom: 6px; }
-.qb-filter input { flex: 1; min-width: 0; }
+.qb-row { display: flex; gap: 6px; align-items: center; margin-bottom: 6px; }
+.qb-row input { flex: 1; min-width: 0; }
+.qb-row select { min-width: 0; }
+.qb-chips { display: flex; flex-wrap: wrap; gap: 6px; align-items: center; margin-bottom: 6px; }
+.qb-chips .chip { display: inline-flex; align-items: center; cursor: pointer; background: #fff; border: 1px solid #d0d7de; }
+.qb-chips .chip.active { background: #eef2ff; color: #2563eb; border-color: #2563eb; }
+.qb-chips input { position: absolute; opacity: 0; pointer-events: none; }
+.qb-table { font-size: 0.75rem; color: #57606a; min-width: 40px; }
 .qb-inline { display: flex; gap: 24px; flex-wrap: wrap; }
-.qb-inline select + select { margin-left: 6px; }
 .qb-inline input[type="number"] { width: 80px; }
 
 .qb-server-sql { display: grid; gap: 4px; margin: 0 0 8px; font-size: 0.85rem; }
 .qb-server-sql code { padding: 6px 8px; background: #f6f8fa; border-radius: 6px; overflow-wrap: anywhere; }
-.qb-results { overflow-x: auto; }
+.qb-scroll { overflow-x: auto; }
+
+.qb-explain-controls { display: flex; flex-wrap: wrap; gap: 8px 16px; align-items: center; font-size: 0.85rem; margin-bottom: 8px; }
+.qb-explain-controls label { display: inline-flex; gap: 6px; align-items: center; }
+.qb-explain-controls input { padding: 0; }
+.verdict { margin: 0 0 4px; padding: 8px 10px; border-radius: 6px; background: #f6f8fa; font-size: 0.9rem; }
+.verdict.good { background: #ecfdf3; color: #05603a; }
+.verdict.bad { background: #fef3f2; color: #912018; }
+.qb-timing { margin: 0 0 8px; font-size: 0.8rem; }
+.plan, .plan ul { list-style: none; margin: 0; padding-left: 18px; }
+.plan { padding-left: 0; }
+.plan ul { border-left: 1px dashed #d0d7de; margin-left: 8px; }
+.plan-node { margin: 4px 0; padding: 6px 8px; border: 1px solid #eaeef2; border-radius: 6px; font-size: 0.85rem; }
+.plan-node.good { border-color: #0ca30c; background: #f6fef9; }
+.plan-node.bad { border-color: #d03b3b; background: #fffbfa; }
+.plan-meta { font-size: 0.8rem; margin-top: 2px; overflow-wrap: anywhere; }
+.qb details { margin-top: 8px; }
+.qb summary { cursor: pointer; font-size: 0.85rem; }
+
 .qb-attacks td { vertical-align: top; }
 .qb-attacks td:first-child { white-space: nowrap; }
 .qb-attacks td button.link { padding: 0; text-align: left; }
@@ -145,3 +167,11 @@ header button.link { margin-top: 0; margin-left: 8px; }
   .qb-top { grid-template-columns: 1fr; }
   .qb-attacks th:nth-child(2), .qb-attacks td:nth-child(2) { display: none; }
 }
+
+/* ---------- Tags on todos ---------- */
+.todos li label { flex: 1; }
+.tags { display: inline-flex; flex-wrap: wrap; gap: 4px; align-items: center; margin: 0 8px; }
+.tag { display: inline-flex; align-items: center; padding: 1px 4px 1px 8px; border-radius: 999px; background: #eef2ff; color: #2563eb; font-size: 0.75rem; }
+.todos li .tag button.link { margin: 0; padding: 0 4px; color: #2563eb; font-size: 0.85rem; }
+.todos li button.link.add-tag { font-size: 0.75rem; color: #8c959f; }
+.tags input { width: 80px; padding: 2px 6px; border: 1px solid #d0d7de; border-radius: 999px; font: inherit; font-size: 0.75rem; }

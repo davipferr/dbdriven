@@ -69,3 +69,20 @@ end $$;
 create trigger todos_notify
   after insert or update or delete on app.todos
   for each row execute function app.todos_notify();
+
+-- Tagging or untagging a todo changes how it looks, so it's announced on the
+-- same channel: open tabs reload their list.
+create function app.todo_tags_notify() returns trigger
+language plpgsql as $$
+declare
+  r app.todo_tags := coalesce(new, old);
+begin
+  perform pg_notify('todo_changes', json_build_object(
+    'op', tg_op, 'id', r.todo_id, 'user_id', r.user_id
+  )::text);
+  return null;
+end $$;
+
+create trigger todo_tags_notify
+  after insert or delete on app.todo_tags
+  for each row execute function app.todo_tags_notify();

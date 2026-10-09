@@ -18,10 +18,38 @@ create table app.todos (
   done         boolean not null default false,
   completed_at timestamptz,
   created_at   timestamptz not null default now(),
-  updated_at   timestamptz not null default now()
+  updated_at   timestamptz not null default now(),
+  unique (id, user_id) -- target for app.todo_tags' "same owner" foreign key
 );
 
 create index on app.todos (user_id);
+
+-- Tags: a todo can have many tags, a tag can be on many todos (many-to-many),
+-- so the links live in their own table, app.todo_tags.
+create table app.tags (
+  id         bigint generated always as identity primary key,
+  user_id    uuid not null default auth.uid() references app.users (id) on delete cascade,
+  name       text not null check (name = lower(name) and name ~ '^[[:alnum:]][[:alnum:]_-]{0,29}$'),
+  created_at timestamptz not null default now(),
+  unique (user_id, name),
+  unique (id, user_id)
+);
+
+create table app.todo_tags (
+  todo_id bigint not null,
+  tag_id  bigint not null,
+  user_id uuid not null default auth.uid(),
+  primary key (todo_id, tag_id),
+  -- Composite foreign keys: the todo AND the tag must belong to the same user as
+  -- the link. Foreign key checks ignore RLS, so with plain `todo_id references
+  -- app.todos (id)` you could tag someone else's todo just by guessing its id.
+  foreign key (todo_id, user_id) references app.todos (id, user_id) on delete cascade,
+  foreign key (tag_id, user_id)  references app.tags (id, user_id) on delete cascade
+);
+
+-- The primary key (todo_id, tag_id) already serves "tags of this todo";
+-- this one serves "todos with this tag".
+create index on app.todo_tags (tag_id);
 
 -- -----------------------------------------------------------------------------
 -- Row Level Security (RLS)
@@ -39,6 +67,17 @@ create index on app.todos (user_id);
 alter table app.todos enable row level security;
 
 create policy todos_owner_only on app.todos
+  using      (user_id = (select auth.uid()))
+  with check (user_id = (select auth.uid()));
+
+alter table app.tags enable row level security;
+alter table app.todo_tags enable row level security;
+
+create policy tags_owner_only on app.tags
+  using      (user_id = (select auth.uid()))
+  with check (user_id = (select auth.uid()));
+
+create policy todo_tags_owner_only on app.todo_tags
   using      (user_id = (select auth.uid()))
   with check (user_id = (select auth.uid()));
 
