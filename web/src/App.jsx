@@ -1,11 +1,13 @@
 import { useCallback, useEffect, useState } from "react";
-import { rpc, subscribeToTodoChanges } from "./api.js";
+import { rpc, subscribe } from "./api.js";
+import Jobs from "./Jobs.jsx";
 
 const TOKEN_KEY = "dbdriven.token";
 
 export default function App() {
   const [token, setToken] = useState(() => localStorage.getItem(TOKEN_KEY));
   const [user, setUser] = useState(null);
+  const [tab, setTab] = useState("todos");
 
   function handleAuth({ token, user }) {
     localStorage.setItem(TOKEN_KEY, token);
@@ -28,12 +30,22 @@ export default function App() {
   if (!user) return <main className="card">Loading…</main>;
 
   return (
-    <main className="card">
+    <main className={tab === "jobs" ? "card wide" : "card"}>
       <header>
-        <span>{user.email}</span>
-        <button className="link" onClick={logout}>Log out</button>
+        <nav className="tabs">
+          <button className={tab === "todos" ? "active" : ""} onClick={() => setTab("todos")}>Todos</button>
+          <button className={tab === "jobs" ? "active" : ""} onClick={() => setTab("jobs")}>Jobs</button>
+        </nav>
+        <span>
+          <span className="muted">{user.email}</span>
+          <button className="link" onClick={logout}>Log out</button>
+        </span>
       </header>
-      <Todos token={token} onUnauthorized={logout} />
+      {tab === "todos" ? (
+        <Todos token={token} onUnauthorized={logout} />
+      ) : (
+        <Jobs token={token} onUnauthorized={logout} />
+      )}
     </main>
   );
 }
@@ -97,7 +109,7 @@ function Todos({ token, onUnauthorized }) {
   useEffect(() => {
     reload();
     // Open this app in two tabs: changes in one show up in the other.
-    return subscribeToTodoChanges(token, reload);
+    return subscribe(token, "todo", reload);
   }, [token, reload]);
 
   async function add(e) {

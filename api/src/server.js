@@ -7,6 +7,7 @@
 //   3. turns Postgres error codes into HTTP status codes
 //   4. relays LISTEN/NOTIFY messages to browsers over Server-Sent Events
 // All of the actual logic lives in ../../db/init/*.sql
+// (Background jobs are run by a separate process: ../../worker)
 // =============================================================================
 import express from "express";
 import pg from "pg";
@@ -108,17 +109,23 @@ app.get("/api/events", async (req, res) => {
   });
 });
 
+// Postgres channel -> SSE event name sent to the browser.
+const CHANNELS = {
+  todo_changes: "todo", // built by app.todos_notify() in 03_rules.sql
+  job_changes: "job", //   built by app.jobs_notify()  in 05_jobs.sql
+};
+
 async function listenForChanges() {
   // LISTEN needs one dedicated connection that stays open (not a pooled one).
   const client = new pg.Client({ connectionString: process.env.DATABASE_URL });
   await client.connect();
-  await client.query("listen todo_changes");
+  for (const channel of Object.keys(CHANNELS)) await client.query(`listen ${channel}`);
 
   client.on("notification", (msg) => {
-    const change = JSON.parse(msg.payload); // built by app.todos_notify() in 03_rules.sql
+    const change = JSON.parse(msg.payload);
     for (const sub of subscribers) {
       if (sub.userId === change.user_id) {
-        sub.res.write(`event: todo\ndata: ${msg.payload}\n\n`);
+        sub.res.write(`event: ${CHANNELS[msg.channel]}\ndata: ${msg.payload}\n\n`);
       }
     }
   });

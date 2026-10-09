@@ -1,0 +1,12 @@
+{
+  "name": "dbdriven-worker",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "start": "node src/worker.js",
+    "dev": "node --watch src/worker.js"
+  },
+  "dependencies": {
+    "pg": "^8.13.1"
+  }
+}

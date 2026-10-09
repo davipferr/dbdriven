@@ -1,4 +1,4 @@
-# DB-Driven Todos
+# DB-Driven Todos (+ a job queue)
 
 A learning project where **PostgreSQL holds all the business logic**: auth, permissions,
 validation, rules and realtime. The backend is a ~100-line gateway that doesn't
@@ -40,6 +40,7 @@ docker compose down -v
 | Business rules        | Triggers (timestamps, max 20 open todos)                  | `db/init/03_rules.sql` |
 | Queries / mutations   | Functions in the `api` schema                             | `db/init/04_api.sql` |
 | Realtime              | Trigger → `pg_notify` → backend `LISTEN` → SSE → browser   | `03_rules.sql`, `api/src/server.js` |
+| Background jobs       | `app.jobs` + `SKIP LOCKED` workers, leases, retries        | `db/init/05_jobs.sql`, `worker/` |
 
 ## Life of a request: adding a todo
 
@@ -90,6 +91,76 @@ select api.list_todos('{}');
 select * from app.todos;    -- now you see only YOUR rows
 commit;
 reset role;
+```
+
+## Background jobs: a job queue in Postgres
+
+A mini BullMQ / Sidekiq. The queue *is* a table (`app.jobs`); the workers are
+plain Node processes (`worker/`) that log in as `app_worker`, a role that can
+only call the `worker.*` functions. Everything lives in `db/init/05_jobs.sql`.
+Open the **Jobs** tab to enqueue jobs and watch them move.
+
+```
+            api.enqueue_job                 worker.claim_jobs
+React ─────► (app_api) ─────► app.jobs ◄─────────────────────── worker × 2
+  ▲                             │  NOTIFY jobs_available ─────►  (app_worker)
+  └──── SSE ◄── api ◄── NOTIFY job_changes                 complete_job / fail_job / heartbeat
+```
+
+| Concept | How | Where |
+|---|---|---|
+| Hand each job to exactly one worker | `SELECT ... FOR UPDATE SKIP LOCKED` | `worker.claim_jobs` |
+| Fast "next job" query | partial index `where status = 'queued'` | `jobs_ready_idx` |
+| Who owns a running job | a **lease** (`lease_expires_at`), not a long transaction | `worker.claim_jobs` |
+| Long jobs stay owned | heartbeat every 5s extends the 15s lease | `worker.heartbeat` |
+| Crashed worker's jobs come back | expired leases are reaped (`outcome = 'lost'`) | `private.reap_expired_jobs` |
+| Retries with backoff | `run_at = now() + 2^attempt s ± 25% jitter` | `private.job_backoff` |
+| Errors that retrying won't fix | `PermanentError` → straight to `failed` | `worker/src/handlers.js` |
+| A slow worker can't overwrite a newer outcome | "fencing": report only if `locked_by = me` | `worker.complete_job` |
+| Only legal status changes | `BEFORE UPDATE` trigger state machine | `app.jobs_check_transition` |
+| Idle workers wake instantly | `NOTIFY jobs_available` (+ 1s poll fallback) | `app.jobs_notify` |
+| Graceful shutdown | SIGTERM → finish, hand back the rest | `worker.unregister` |
+
+### Why SKIP LOCKED?
+
+Ten workers all run "give me the top 5 queued jobs" at the same instant. Without
+locking, they'd all get the *same* 5. With plain `FOR UPDATE`, nine of them would
+wait in line behind the first one's locks. With `SKIP LOCKED`, each one locks the
+first rows nobody else holds and moves on, so they get different jobs, without waiting.
+
+### Why at-least-once (and not exactly-once)?
+
+A worker can finish the work (email sent!) and crash before it reports "done".
+The queue can't tell this apart from "crashed before sending", so when the lease
+expires it runs the job again. Jobs are never **lost**, but they can run **twice**.
+So handlers must be **idempotent**: e.g. pass `job.id` as an idempotency key to
+the email provider. (Exactly-once is only possible when the work and the "done"
+mark commit in the same database transaction.)
+
+### Try it
+
+In the Jobs tab, enqueue:
+
+- `flaky` × 10: watch attempts climb and "runs in 4s… 8s…" (backoff)
+- `always_fails` with 3 attempts: ends in **failed**; click **Retry** for one more try
+- `slow` (30s): outlives the 15s lease because of the heartbeat
+- `crash`: kills a worker mid-job. Docker restarts it, and ~15s later the job's
+  lease expires and it runs again (attempt history shows `lost`). It crashes every
+  time, so it's a "poison pill" that ends in `failed` after its max attempts.
+- `send_email` × 500 with 2 workers, then `docker compose up -d --scale worker=5`
+
+```bash
+docker compose logs -f worker
+```
+
+```sql
+-- Watch the queue from psql (as postgres, RLS doesn't apply):
+select status, count(*) from app.jobs group by 1;
+select id, kind, status, attempts, locked_by, lease_expires_at - now() as lease_left
+from app.jobs where status = 'running';
+-- See SKIP LOCKED yourself: in two psql windows, run this in each (don't commit yet):
+begin;
+select id from app.jobs where status = 'queued' order by id limit 3 for update skip locked;
 ```
 
 ## Exercises to deepen understanding

@@ -8,7 +8,8 @@ export default defineConfig({
     port: 5173,
     // The browser calls /api/... on the same origin (no CORS needed);
     // Vite forwards it to the api container. "api" is the compose service name.
-    proxy: { "/api": "http://api:4000" },
+    // (Set API_URL=http://localhost:4000 to run outside Docker.)
+    proxy: { "/api": process.env.API_URL ?? "http://api:4000" },
     // File change events don't cross Docker bind mounts on Windows/macOS, so poll.
     watch: { usePolling: true },
   },

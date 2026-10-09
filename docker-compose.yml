@@ -35,6 +35,26 @@ services:
         condition: service_healthy
     restart: unless-stopped
 
+  # Queue workers: claim jobs from app.jobs and run them (see ./worker/src).
+  # Two replicas, to show that SKIP LOCKED never hands the same job to both.
+  # Try more: docker compose up --scale worker=4
+  worker:
+    build: ./worker
+    environment:
+      # Logs in as app_worker, which may only call the worker.* functions (db/init/05_jobs.sql)
+      DATABASE_URL: postgres://app_worker:app_worker_dev_password@db:5432/app
+      CONCURRENCY: 3 # jobs in flight per worker process
+      QUEUES: default
+    volumes:
+      - ./worker/src:/app/src
+    deploy:
+      replicas: 2
+    stop_grace_period: 15s # time for in-flight jobs to finish on SIGTERM
+    depends_on:
+      db:
+        condition: service_healthy
+    restart: unless-stopped # the `crash` job kills the process; Docker brings it back
+
   # React (Vite dev server). Proxies /api/* to the api service.
   web:
     build: ./web

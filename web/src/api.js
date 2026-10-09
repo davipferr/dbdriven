@@ -19,9 +19,10 @@ export async function rpc(fn, args = {}, token) {
   return body;
 }
 
-// Realtime: the server pushes an event whenever one of OUR todos changes.
-export function subscribeToTodoChanges(token, onChange) {
+// Realtime: the server pushes an event whenever one of OUR rows changes.
+// event = "todo" (app.todos) or "job" (app.jobs)
+export function subscribe(token, event, onChange) {
   const source = new EventSource(`/api/events?token=${encodeURIComponent(token)}`);
-  source.addEventListener("todo", (e) => onChange(JSON.parse(e.data)));
+  source.addEventListener(event, (e) => onChange(JSON.parse(e.data)));
   return () => source.close();
 }
