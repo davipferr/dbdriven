@@ -60,6 +60,13 @@ create policy lab_orders_owner_only on app.lab_orders
   using      (user_id = (select auth.uid()))
   with check (user_id = (select auth.uid()));
 
+-- Which try this is (1, 2, ...). The gateway retries transactions that fail
+-- with 40001/40P01 and says so in a transaction-local setting, like the token.
+create function app.lab_attempt() returns int
+language sql stable set search_path = '' as $$
+  select coalesce(nullif(current_setting('request.attempt', true), '')::int, 1);
+$$;
+
 -- ---------- Setup and results ----------
 
 -- args: { stock }. Throws away your previous product (and its orders) and
@@ -207,7 +214,7 @@ end $$;
 -- 4. OPTIMISTIC LOCKING: read the stock AND a version number, think without
 -- holding any lock, then write only if the version is still the one we read.
 -- If someone got there first, 0 rows are updated: we raise 40001 and the
--- CLIENT retries in a new transaction (like an HTTP 409 + "reload and retry").
+-- caller retries in a new transaction (like an HTTP 409 + "reload and retry").
 --
 -- Why not just loop and retry right here? Try it: it stays correct but gets
 -- slow. When our UPDATE waits for the winner's row lock and then finds the
@@ -244,7 +251,7 @@ begin
   end if;
 
   insert into app.lab_orders (product_id, buyer, strategy, attempts)
-  values (v_id, (args->>'buyer')::int, 'optimistic', coalesce((args->>'attempt')::int, 1));
+  values (v_id, (args->>'buyer')::int, 'optimistic', app.lab_attempt());
 
   return jsonb_build_object('buyer', args->'buyer', 'status', 'bought', 'seen_stock', v_stock,
                             'attempts', 1, 'isolation', current_setting('transaction_isolation'));
@@ -254,13 +261,15 @@ end $$;
 -- api.lab_buy_naive with isolation = 'serializable' (see api/src/server.js).
 -- Postgres then promises the result equals SOME one-at-a-time order of the
 -- transactions. When it can't keep that promise, it aborts one with SQLSTATE
--- 40001 (serialization_failure) and the CLIENT must run it again from the top.
+-- 40001 (serialization_failure) and the caller must run it again from the top
+-- (here the gateway does, see `retry` in /api/rpc-batch).
 -- A retry can't happen inside the function: the whole transaction is doomed.
 
 -- ---------- Privileges ----------
 
 grant select, insert, update, delete on app.lab_products to app_api;
 grant select, insert, delete on app.lab_orders to app_api;
+grant execute on function app.lab_attempt() to app_api;
 grant execute on function
   api.lab_reset(jsonb), api.lab_state(jsonb),
   api.lab_buy_naive(jsonb), api.lab_buy_for_update(jsonb),

@@ -1,5 +1,26 @@
 import { useCallback, useState } from "react";
-import { rpc, rpcBatch } from "./api.js";
+import { rpc } from "./api.js";
+import BankTransfer from "./BankTransfer.jsx";
+import { race as runLanes, Tile, Timeline } from "./labShared.jsx";
+
+// Two scenarios, kept mounted so each keeps its own run history.
+export default function Concurrency(props) {
+  const [scenario, setScenario] = useState("flash");
+  return (
+    <div className="lab">
+      <div className="filters">
+        <button className={scenario === "flash" ? "chip active" : "chip"} onClick={() => setScenario("flash")}>
+          Flash sale <span className="chip-note">· 1 row</span>
+        </button>
+        <button className={scenario === "bank" ? "chip active" : "chip"} onClick={() => setScenario("bank")}>
+          Bank transfer <span className="chip-note">· 2 rows, deadlocks</span>
+        </button>
+      </div>
+      <div className="lab" hidden={scenario !== "flash"}><FlashSale {...props} /></div>
+      <div className="lab" hidden={scenario !== "bank"}><BankTransfer {...props} /></div>
+    </div>
+  );
+}
 
 // The five ways to sell the last items (db/init/07_concurrency.sql).
 // `sql` is the heart of each function, trimmed for reading.
@@ -43,32 +64,29 @@ insert into app.lab_orders ...;`,
     fn: "lab_buy_optimistic",
     isolation: "read committed",
     retry: true,
-    note: "Think without holding locks; write only if the version is unchanged. 0 rows updated means someone beat you: the function raises 40001 and this page retries in a new transaction.",
+    note: "Think without holding locks; write only if the version is unchanged. 0 rows updated means someone beat you: the function raises 40001 and the gateway retries in a new transaction.",
     sql: `select stock, version into v_stock, v_version from app.lab_products where id = v_id;
 perform pg_sleep(delay);            -- no locks held while thinking
 if v_stock <= 0 then return 'sold_out'; end if;
 update app.lab_products set stock = v_stock - 1, version = v_version + 1
 where id = v_id and version = v_version;   -- 0 rows if someone beat us
 if not found then raise exception '...' using errcode = '40001'; end if;
--- -> client retries the whole transaction`,
+-- -> the gateway retries the whole transaction`,
   },
   serializable: {
     label: "SERIALIZABLE + retry",
     fn: "lab_buy_naive",
     isolation: "serializable",
     retry: true,
-    note: "The NAIVE function, unchanged, at SERIALIZABLE isolation. Postgres aborts the losers with 40001, and this page (the client) retries them in a new transaction.",
+    note: "The NAIVE function, unchanged, at SERIALIZABLE isolation. Postgres aborts the losers with 40001, and the gateway retries them in a new transaction.",
     sql: `begin isolation level serializable;   -- the only change
 select api.lab_buy_naive(...);
 -- ERROR 40001: could not serialize access due to concurrent update
--- -> client runs the whole transaction again`,
+-- -> the gateway runs the whole transaction again`,
   },
 };
 
-const RETRYABLE = new Set(["40001", "40P01"]); // serialization_failure, deadlock_detected
-const MAX_WAVES = 25;
-
-export default function Concurrency({ token, onUnauthorized }) {
+function FlashSale({ token, onUnauthorized }) {
   const [strategy, setStrategy] = useState("naive");
   const [stock, setStock] = useState(3);
   const [buyers, setBuyers] = useState(10);
@@ -83,52 +101,26 @@ export default function Concurrency({ token, onUnauthorized }) {
       const s = STRATEGIES[key];
       const product = await rpc("lab_reset", { stock: Number(stock) }, token);
       const n = Math.min(Math.max(Number(buyers), 1), 20);
-      const rows = Array.from({ length: n }, (_, i) => ({ buyer: i + 1, tries: [], final: null }));
-
-      // Wave 1: everybody at once. Next waves: only the ones Postgres aborted.
-      let pending = rows;
-      for (let wave = 1; pending.length && wave <= MAX_WAVES; wave++) {
-        const results = await rpcBatch(
-          pending.map((r) => ({
-            fn: s.fn,
-            isolation: s.isolation,
-            args: { product_id: product.id, buyer: r.buyer, delay_ms: Number(delay), strategy: key, attempt: wave },
-          })),
-          token,
-        );
-        const next = [];
-        results.forEach((res, i) => {
-          const row = pending[i];
-          const time = { startedAt: res.startedAt, finishedAt: res.finishedAt };
-          if (res.ok) {
-            row.tries.push({ ...time, outcome: res.result.status });
-            row.final = { ...res.result, attempts: row.tries.length };
-          } else if (s.retry && RETRYABLE.has(res.code)) {
-            row.tries.push({ ...time, outcome: "retry", error: res.error });
-            next.push(row);
-          } else {
-            row.tries.push({ ...time, outcome: "error", error: res.error });
-            row.final = { status: "error", error: res.error, attempts: row.tries.length };
-          }
-        });
-        pending = next;
-      }
-      for (const row of pending) row.final = { status: "error", error: `Still failing after ${MAX_WAVES} tries` };
+      const lanes = Array.from({ length: n }, (_, i) => ({
+        id: i + 1,
+        label: `Buyer ${i + 1}`,
+        call: {
+          fn: s.fn,
+          isolation: s.isolation,
+          retry: s.retry, // the gateway re-runs it on 40001 / 40P01
+          args: { product_id: product.id, buyer: i + 1, delay_ms: Number(delay), strategy: key },
+        },
+      }));
+      const result = await runLanes(lanes, token);
 
       const state = await rpc("lab_state", {}, token);
-      const tries = rows.flatMap((r) => r.tries);
-      const t0 = Math.min(...tries.map((t) => t.startedAt));
-      const t1 = Math.max(...tries.map((t) => t.finishedAt));
       return {
         key,
         delay: Number(delay),
-        rows,
-        t0,
-        durationMs: t1 - t0,
+        ...result,
         initial: state.product.initial_stock,
         finalStock: state.product.stock,
         orders: state.orders.length,
-        retries: rows.reduce((sum, r) => sum + Math.max((r.final?.attempts ?? 1) - 1, 0), 0),
       };
     },
     [token, stock, buyers, delay],
@@ -155,7 +147,7 @@ export default function Concurrency({ token, onUnauthorized }) {
   const s = STRATEGIES[strategy];
 
   return (
-    <div className="lab">
+    <>
       <section>
         <h2>Flash sale <span className="muted">({buyers} buyers, {stock} pairs of sneakers left, everyone clicks Buy at the same moment)</span></h2>
         <form
@@ -207,9 +199,15 @@ export default function Concurrency({ token, onUnauthorized }) {
 
       {error && <p className="error">{error}</p>}
 
-      {race && <Timeline race={race} />}
+      {race && (
+        <Timeline
+          race={race}
+          legend={["bought", "sold_out", "conflict", "error"]}
+          detail={(row) => row.final.seen_stock != null && <span className="muted"> · saw {row.final.seen_stock}</span>}
+        />
+      )}
       {history.length > 0 && <History history={history} onClear={() => setHistory([])} />}
-    </div>
+    </>
   );
 }
 
@@ -247,60 +245,6 @@ function Verdict({ race }) {
         {race.retries > 0 && <> {race.retries} retr{race.retries === 1 ? "y" : "ies"} were needed.</>}
       </p>
     </div>
-  );
-}
-
-function Tile({ label, value, bad }) {
-  return (
-    <div className={bad ? "tile bad" : "tile"}>
-      <span className="tile-value">{value}</span>
-      <span className="tile-label">{label}</span>
-    </div>
-  );
-}
-
-const OUTCOME_LABEL = { bought: "bought", sold_out: "sold out", retry: "conflict (40001)", error: "error" };
-
-// One row per buyer, one bar per transaction, on a shared time axis.
-// Parallel bars = buyers ran at the same time; a staircase = they queued.
-function Timeline({ race }) {
-  const span = Math.max(race.durationMs, 1);
-  return (
-    <section>
-      <div className="section-head">
-        <h2>Timeline <span className="muted">(each bar is one transaction, 0 → {race.durationMs} ms)</span></h2>
-        <div className="legend">
-          {["bought", "sold_out", "retry", "error"].map((o) => (
-            <span key={o}><span className={`swatch outcome-${o}`} /> {OUTCOME_LABEL[o]}</span>
-          ))}
-        </div>
-      </div>
-      <div className="lab-timeline">
-        {race.rows.map((row) => (
-          <div key={row.buyer} className="lab-lane">
-            <span className="lab-buyer">Buyer {row.buyer}</span>
-            <div className="lab-track">
-              {row.tries.map((t, i) => (
-                <span
-                  key={i}
-                  className={`lab-bar outcome-${t.outcome}`}
-                  style={{
-                    left: `${((t.startedAt - race.t0) / span) * 100}%`,
-                    width: `max(3px, ${((t.finishedAt - t.startedAt) / span) * 100}%)`,
-                  }}
-                  title={`${OUTCOME_LABEL[t.outcome]} · ${t.startedAt - race.t0}–${t.finishedAt - race.t0} ms${t.error ? ` · ${t.error}` : ""}`}
-                />
-              ))}
-            </div>
-            <span className={`lab-outcome outcome-text-${row.final?.status}`}>
-              {OUTCOME_LABEL[row.final?.status] ?? "?"}
-              {row.final?.seen_stock != null && <span className="muted"> · saw {row.final.seen_stock}</span>}
-              {row.final?.attempts > 1 && <span className="muted"> · ×{row.final.attempts}</span>}
-            </span>
-          </div>
-        ))}
-      </div>
-    </section>
   );
 }
 

@@ -28,6 +28,10 @@ button.link { background: none; color: #2563eb; padding: 4px; margin-top: 8px; }
 
 /* ---------- Tabs ---------- */
 .card.wide { max-width: 1040px; }
+/* Todos has little content, but its header (4 tabs + email + Log out) needs room */
+.card.todos-card { max-width: 680px; }
+header { flex-wrap: wrap; gap: 8px; } /* on a phone, the email drops below the tabs */
+header > span { white-space: nowrap; }
 .tabs { display: flex; gap: 4px; }
 .tabs button { background: none; color: #57606a; padding: 6px 12px; }
 .tabs button.active { background: #eef2ff; color: #2563eb; font-weight: 600; }
@@ -196,20 +200,28 @@ header button.link { margin-top: 0; margin-left: 8px; }
 .lab .tile.bad { border-color: #d03b3b; box-shadow: inset 0 0 0 1px #d03b3b; }
 .lab .tile.bad .tile-value { color: #b42318; }
 
-.outcome-bought   { background: #0ca30c; }
-.outcome-sold_out { background: #8c959f; }
-.outcome-retry    { background: #d48806; }
+.lab[hidden] { display: none; }
+.chip-note { opacity: 0.75; }
+
+.outcome-bought, .outcome-transferred             { background: #0ca30c; }
+.outcome-sold_out, .outcome-insufficient_funds    { background: #8c959f; }
+.outcome-conflict { background: #d48806; }
+.outcome-deadlock { background: #7c3aed; }
 .outcome-error    { background: #d03b3b; }
-.outcome-text-bought { color: #05603a; }
-.outcome-text-sold_out { color: #57606a; }
+.outcome-text-bought, .outcome-text-transferred { color: #05603a; }
+.outcome-text-sold_out, .outcome-text-insufficient_funds { color: #57606a; }
 .outcome-text-error { color: #b42318; }
 .lab-timeline { display: grid; gap: 4px; }
 .lab-lane { display: grid; grid-template-columns: 64px minmax(0, 1fr) 150px; gap: 8px; align-items: center; font-size: 0.8rem; }
-.lab-buyer { color: #57606a; white-space: nowrap; }
+.lab-timeline.wide-labels .lab-lane { grid-template-columns: 130px minmax(0, 1fr) 190px; }
+.lab-buyer { color: #57606a; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.lab-accounts { margin-bottom: 8px; }
+.lab-accounts tr.wrong td { background: #fef3f2; color: #912018; }
+.lab .verdict code { font-size: 0.85em; }
 .lab-track { position: relative; height: 14px; background: #f6f8fa; border-radius: 3px; }
 .lab-bar { position: absolute; top: 2px; bottom: 2px; border-radius: 2px; }
 .lab-outcome { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 @media (max-width: 760px) {
   .lab-top { grid-template-columns: 1fr; }
-  .lab-lane { grid-template-columns: 56px minmax(0, 1fr) 90px; }
+  .lab-lane, .lab-timeline.wide-labels .lab-lane { grid-template-columns: 90px minmax(0, 1fr) 90px; }
 }

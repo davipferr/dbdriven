@@ -21,7 +21,8 @@ export async function rpc(fn, args = {}, token) {
 
 // Many calls at the SAME moment, each in its own transaction on its own
 // connection (the gateway starts them together). One entry per call:
-//   { ok, result | error + code, startedAt, finishedAt }
+//   { ok, result | error + code, tries: [{ ok, code?, error?, startedAt, finishedAt }] }
+// A call with retry: true is re-run by the gateway on 40001 / 40P01.
 export async function rpcBatch(calls, token) {
   const res = await fetch("/api/rpc-batch", {
     method: "POST",

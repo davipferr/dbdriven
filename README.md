@@ -44,6 +44,7 @@ docker compose down -v
 | Tags (many-to-many)   | `app.tags` + `app.todo_tags`, same-owner composite FKs     | `db/init/02_schema.sql` |
 | User-built queries    | JSON AST → whitelisted dynamic SQL, then RLS              | `db/init/06_query_builder.sql` |
 | Concurrent writes     | Row locks, atomic `UPDATE`, version column, `SERIALIZABLE` | `db/init/07_concurrency.sql` |
+| Deadlocks             | Locking several rows in one global order (lowest id first) | `db/init/08_bank_transfer.sql` |
 
 ## Life of a request: adding a todo
 
@@ -294,7 +295,7 @@ todos"), a visual node editor (React Flow) over the same AST, and building
 
 ## Concurrency Lab: 10 buyers, 3 sneakers
 
-The **Concurrency** tab runs a flash sale: you pick the stock (say 3) and the number of
+The **Concurrency** tab has two scenarios. The first is a flash sale: you pick the stock (say 3) and the number of
 buyers (say 10), and every buyer clicks *Buy* at the same moment. Each click is its own
 transaction on its own connection. Afterwards the page compares what the buyers were
 told with what the tables say.
@@ -309,10 +310,10 @@ write:
 | Naive | `api.lab_buy_naive` | All 10 read `stock = 3`, all write `2`. **10 orders**, and the stock column says **2**: an oversell *and* 9 lost updates. This is what `product.stock -= 1; save()` does in most ORMs. |
 | `SELECT … FOR UPDATE` | `api.lab_buy_for_update` | The first reader locks the row and the others wait. Correct, but the timeline turns into a staircase: buyers go one at a time. |
 | Atomic `UPDATE` | `api.lab_buy_atomic` | `update … set stock = stock - 1 where stock > 0`: there is no gap. A waiting `UPDATE` re-checks its `WHERE` against the committed row (a READ COMMITTED rule), so it can't oversell. Correct *and* the thinking stays parallel. |
-| Optimistic (version) | `api.lab_buy_optimistic` | Think without locks, then `update … where version = <the one I read>`. 0 rows updated = someone beat you: raise `40001` and the client retries in a new transaction. (Why not retry inside the function? See the comment there: a losing `UPDATE` keeps a row lock until its transaction ends.) |
-| `SERIALIZABLE` + retry | `api.lab_buy_naive` (!) | The **naive code, unchanged**, at `SERIALIZABLE`. Postgres aborts the losers with SQLSTATE `40001` and the client runs them again in a new transaction. |
+| Optimistic (version) | `api.lab_buy_optimistic` | Think without locks, then `update … where version = <the one I read>`. 0 rows updated = someone beat you: raise `40001` and the gateway retries in a new transaction. (Why not retry inside the function? See the comment there: a losing `UPDATE` keeps a row lock until its transaction ends.) |
+| `SERIALIZABLE` + retry | `api.lab_buy_naive` (!) | The **naive code, unchanged**, at `SERIALIZABLE`. Postgres aborts the losers with SQLSTATE `40001` and the gateway runs them again in a new transaction. |
 
-Three things in the gateway exist for this tab (`api/src/server.js`):
+A few things in the gateway exist for this tab (`api/src/server.js`):
 
 - **`POST /api/rpc-batch`** runs many calls at once, one transaction each. Firing 10
   `fetch`es from the browser wouldn't make a real race: a browser opens only about 6
@@ -321,10 +322,14 @@ Three things in the gateway exist for this tab (`api/src/server.js`):
   query, so a function can't choose it for itself.
 - **A pool of 25 connections** (pg's default is 10), so a 20-buyer race isn't quietly
   queued by the pool.
-
-`40001` (serialization failure) and `40P01` (deadlock) map to HTTP 409 and mean
-"retry the whole transaction". Retrying can't happen inside the function, because the
-transaction is already doomed.
+- **`retry: true`** per call. `40001` (serialization failure) and `40P01` (deadlock)
+  mean "the transaction was the problem, not the data: run it again". Retrying can't
+  happen inside the function, because the transaction is already doomed, so the
+  gateway re-runs the whole call. It waits a random, growing moment first (backoff
+  with jitter): retrying instantly sends the victim back into the same lock queue,
+  where it deadlocks again. The attempt number reaches SQL as the transaction-local
+  setting `request.attempt`, the same way the token does. Outside a batch, the same
+  codes map to HTTP 409.
 
 ### Try it
 
@@ -336,15 +341,55 @@ transaction is already doomed.
 4. In psql, `begin; select * from app.lab_products for update;` and leave it open,
    then run a race. Everyone waits for you. `commit;` releases them.
 
+## Concurrency Lab, part 2: bank transfers and deadlocks
+
+The second scenario moves money: Alice pays Bob and Bob pays Alice, many times, all
+at once. A sale touched **one** row per transaction; a transfer touches **two**, and
+that brings a new failure, the **deadlock**:
+
+```
+T1 (Alice → Bob)              T2 (Bob → Alice)
+lock Alice                    lock Bob
+lock Bob    ← waits for T2    lock Alice  ← waits for T1      stuck forever
+```
+
+Postgres waits `deadlock_timeout`, finds the cycle, kills one transaction with
+SQLSTATE `40P01`, and lets the other go on. Two checks tell you whether the database
+survived: the **total** across all accounts must not change, and every account's
+balance must equal what its recorded transfers say.
+
+| Strategy | Function | What happens |
+|---|---|---|
+| Naive | `api.lab_transfer_naive` | Reads both balances, writes what it read ± the amount. Opposite transfers overwrite each other: the balances stop matching the transfers, and with 3+ accounts the total changes (money appears or vanishes). |
+| `FOR UPDATE` (from, then to) | `api.lab_transfer_for_update` | Locks the payer, thinks, locks the payee. Always correct, but opposite directions lock in opposite orders: dozens of deadlocks and ~5× slower. |
+| Atomic `UPDATE`s | `api.lab_transfer_atomic` | The flash-sale fix (`balance = balance - x`). No lost updates, but **still deadlocks**: every `UPDATE` holds its row lock until `COMMIT`, and a transfer runs two of them. |
+| Lock in id order | `api.lab_transfer_ordered` | The same two locks, **lower id first**, whichever way the money goes. A queue, never a cycle: zero deadlocks, about one think time per conflicting transfer. |
+| `SERIALIZABLE` + retry | `api.lab_transfer_naive` | The naive code at `SERIALIZABLE`. Postgres aborts what can't be serialized (`40001`); the gateway retries. |
+
+Lock ordering is *the* standard fix: every code path that locks several rows agrees
+on one global order. Checking for a deadlock is expensive, so Postgres only does it
+after waiting `deadlock_timeout` (1 s by default). `08_bank_transfer.sql` lowers it to
+200 ms for the `app_api` role only, so a race full of deadlocks finishes in seconds,
+not minutes.
+
+### Try it
+
+1. *Naive* with 3 accounts: the total changes, and the accounts table highlights the
+   balances that don't match their transfers.
+2. *Naive* with 2 accounts: the total still adds up (every write moves money between
+   the same two rows), but the balances are wrong. A total-only check would miss it.
+3. *Run all 5* with 2 accounts. Compare the **Deadlocks** and **Took** columns of
+   `FOR UPDATE` and *Lock in id order*: same locks, different order.
+4. Raise the amount to 80 and watch for "insufficient funds": the `CHECK (balance >= 0)`
+   never fires, because every strategy checks the balance before it writes.
+
 ## Exercises to deepen understanding
 
 1. Add a `priority` column with a `CHECK (priority between 1 and 3)` and expose it in `api.add_todo`.
 2. Add todo sharing: a `app.todo_shares` table and a second RLS policy allowing `select` for shared users.
 3. Add an `api.change_password` function (SECURITY DEFINER; verify the old password first).
 4. Write tests for your RLS policies with [pgTAP](https://pgtap.org/).
-5. Add a bank transfer to the Concurrency Lab: A→B and B→A at the same time deadlock
-   (`40P01`) unless both lock the two accounts in the same order (lowest id first).
-6. Replace `db/init` with a real migration tool (dbmate or Sqitch), so you can change the
+5. Replace `db/init` with a real migration tool (dbmate or Sqitch), so you can change the
    schema without wiping data.
 
 ## Not production-ready (on purpose)

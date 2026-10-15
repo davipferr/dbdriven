@@ -32,7 +32,7 @@ export default function App() {
   if (!user) return <main className="card">Loading…</main>;
 
   return (
-    <main className={tab === "todos" ? "card" : "card wide"}>
+    <main className={tab === "todos" ? "card todos-card" : "card wide"}>
       <header>
         <nav className="tabs">
           <button className={tab === "todos" ? "active" : ""} onClick={() => setTab("todos")}>Todos</button>

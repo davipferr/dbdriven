@@ -32,13 +32,16 @@ const ISOLATION = {
   serializable: "serializable",
 };
 
-async function callRpc(fn, args, token, isolation) {
+async function callRpc(fn, args, token, isolation, attempt = 1) {
   const client = await pool.connect();
   try {
     await client.query(`begin isolation level ${ISOLATION[isolation] ?? "read committed"}`);
     // `true` = transaction-local, so the token can't leak into the next request
-    // that reuses this pooled connection.
-    await client.query("select set_config('request.jwt', $1, true)", [token ?? ""]);
+    // that reuses this pooled connection. request.attempt says which retry this is.
+    await client.query("select set_config('request.jwt', $1, true), set_config('request.attempt', $2, true)", [
+      token ?? "",
+      String(attempt),
+    ]);
     const { rows } = await client.query(`select api."${fn}"($1::jsonb) as result`, [
       JSON.stringify(args ?? {}),
     ]);
@@ -91,37 +94,55 @@ app.post("/api/rpc/:fn", async (req, res) => {
 });
 
 // ---------- 1b. Batch: many RPCs at the same moment, one transaction each ----------
-// Body: { calls: [{ fn, args, isolation? }] }. Answers with one entry per call,
-// in order, with server timestamps so the browser can draw a timeline.
+// Body: { calls: [{ fn, args, isolation?, retry? }] }. Answers with one entry per
+// call, in order. `tries` has server timestamps so the browser can draw a timeline.
+//
+// retry: true re-runs the call when Postgres says the transaction itself is
+// the problem, not the data: 40001 (serialization_failure) and 40P01
+// (deadlock_detected). That's always safe here because the failed attempt was
+// rolled back completely, so the retry starts from scratch.
+//
+// Before retrying, wait a RANDOM bit that grows with each attempt ("backoff
+// with jitter"). Retrying instantly sends the victim straight back into the
+// same lock queue, in the same order, and it deadlocks again: a retry storm.
+
+const RETRYABLE = new Set(["40001", "40P01"]);
+const MAX_ATTEMPTS = 25;
+const backoff = (attempt) => new Promise((r) => setTimeout(r, Math.random() * 50 * Math.min(attempt, 6)));
+
+async function callWithRetries({ fn, args, isolation, retry }, token) {
+  const tries = [];
+  for (let attempt = 1; ; attempt++) {
+    const startedAt = Date.now();
+    try {
+      const result = await callRpc(fn, args, token, isolation, attempt);
+      tries.push({ ok: true, startedAt, finishedAt: Date.now() });
+      return { ok: true, result, tries };
+    } catch (err) {
+      const status = httpStatusFor(err.code);
+      if (status === 500) console.error(err);
+      const error = status === 500 ? "Internal server error" : err.message;
+      tries.push({ ok: false, code: err.code, error, startedAt, finishedAt: Date.now() });
+      if (!retry || !RETRYABLE.has(err.code) || attempt >= MAX_ATTEMPTS) {
+        return { ok: false, status, error, code: err.code, tries };
+      }
+      await backoff(attempt);
+    }
+  }
+}
 
 app.post("/api/rpc-batch", async (req, res) => {
   const calls = req.body?.calls;
   if (!Array.isArray(calls) || calls.length === 0 || calls.length > 50) {
     return res.status(400).json({ error: "calls must be an array of 1-50 items" });
   }
+  if (!calls.every((c) => FUNCTION_NAME.test(c?.fn ?? ""))) {
+    return res.status(404).json({ error: "Unknown function" });
+  }
   const token = bearerToken(req);
-  const results = await Promise.all(
-    calls.map(async ({ fn, args, isolation }) => {
-      const startedAt = Date.now();
-      if (!FUNCTION_NAME.test(fn ?? "")) return { ok: false, error: "Unknown function", startedAt, finishedAt: startedAt };
-      try {
-        const result = await callRpc(fn, args, token, isolation);
-        return { ok: true, result, startedAt, finishedAt: Date.now() };
-      } catch (err) {
-        const status = httpStatusFor(err.code);
-        if (status === 500) console.error(err);
-        return {
-          ok: false,
-          status,
-          error: status === 500 ? "Internal server error" : err.message,
-          code: err.code,
-          startedAt,
-          finishedAt: Date.now(),
-        };
-      }
-    }),
-  );
-  if (results.some((r) => r.status === 401)) return res.status(401).json({ error: results.find((r) => r.status === 401).error });
+  const results = await Promise.all(calls.map((call) => callWithRetries(call, token)));
+  const unauthorized = results.find((r) => r.status === 401);
+  if (unauthorized) return res.status(401).json({ error: unauthorized.error });
   res.json(results);
 });
 
