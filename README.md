@@ -43,6 +43,7 @@ docker compose down -v
 | Background jobs       | `app.jobs` + `SKIP LOCKED` workers, leases, retries        | `db/init/05_jobs.sql`, `worker/` |
 | Tags (many-to-many)   | `app.tags` + `app.todo_tags`, same-owner composite FKs     | `db/init/02_schema.sql` |
 | User-built queries    | JSON AST → whitelisted dynamic SQL, then RLS              | `db/init/06_query_builder.sql` |
+| Concurrent writes     | Row locks, atomic `UPDATE`, version column, `SERIALIZABLE` | `db/init/07_concurrency.sql` |
 
 ## Life of a request: adding a todo
 
@@ -291,13 +292,59 @@ Ideas for later: `HAVING` (filter on an aggregate, like "tags with more than 2 o
 todos"), a visual node editor (React Flow) over the same AST, and building
 `qb.schema()` from `information_schema.columns`.
 
+## Concurrency Lab: 10 buyers, 3 sneakers
+
+The **Concurrency** tab runs a flash sale: you pick the stock (say 3) and the number of
+buyers (say 10), and every buyer clicks *Buy* at the same moment. Each click is its own
+transaction on its own connection. Afterwards the page compares what the buyers were
+told with what the tables say.
+
+Every buy function has the same three steps: **read** the stock, **think** for a moment
+(`pg_sleep`, standing in for a payment call or a slow server), **write** the new stock
+and an order. The strategies differ only in how they protect the gap between read and
+write:
+
+| Strategy | Function | What happens with 10 buyers, 3 items |
+|---|---|---|
+| Naive | `api.lab_buy_naive` | All 10 read `stock = 3`, all write `2`. **10 orders**, and the stock column says **2**: an oversell *and* 9 lost updates. This is what `product.stock -= 1; save()` does in most ORMs. |
+| `SELECT … FOR UPDATE` | `api.lab_buy_for_update` | The first reader locks the row and the others wait. Correct, but the timeline turns into a staircase: buyers go one at a time. |
+| Atomic `UPDATE` | `api.lab_buy_atomic` | `update … set stock = stock - 1 where stock > 0`: there is no gap. A waiting `UPDATE` re-checks its `WHERE` against the committed row (a READ COMMITTED rule), so it can't oversell. Correct *and* the thinking stays parallel. |
+| Optimistic (version) | `api.lab_buy_optimistic` | Think without locks, then `update … where version = <the one I read>`. 0 rows updated = someone beat you: raise `40001` and the client retries in a new transaction. (Why not retry inside the function? See the comment there: a losing `UPDATE` keeps a row lock until its transaction ends.) |
+| `SERIALIZABLE` + retry | `api.lab_buy_naive` (!) | The **naive code, unchanged**, at `SERIALIZABLE`. Postgres aborts the losers with SQLSTATE `40001` and the client runs them again in a new transaction. |
+
+Three things in the gateway exist for this tab (`api/src/server.js`):
+
+- **`POST /api/rpc-batch`** runs many calls at once, one transaction each. Firing 10
+  `fetch`es from the browser wouldn't make a real race: a browser opens only about 6
+  connections per host over HTTP/1.1.
+- **`isolation`** per call. The isolation level must be set at `BEGIN`, before any
+  query, so a function can't choose it for itself.
+- **A pool of 25 connections** (pg's default is 10), so a 20-buyer race isn't quietly
+  queued by the pool.
+
+`40001` (serialization failure) and `40P01` (deadlock) map to HTTP 409 and mean
+"retry the whole transaction". Retrying can't happen inside the function, because the
+transaction is already doomed.
+
+### Try it
+
+1. *Naive*, stock 3, 10 buyers, 100 ms: red verdict, 10 orders.
+2. Set think time to 0 and run *Naive* a few times. Sometimes it's right, sometimes
+   not: that's why race conditions survive testing and show up in production.
+3. *Run all 5* and compare the **Took** column: `FOR UPDATE` takes about buyers × think
+   time; atomic takes about one think time.
+4. In psql, `begin; select * from app.lab_products for update;` and leave it open,
+   then run a race. Everyone waits for you. `commit;` releases them.
+
 ## Exercises to deepen understanding
 
 1. Add a `priority` column with a `CHECK (priority between 1 and 3)` and expose it in `api.add_todo`.
 2. Add todo sharing: a `app.todo_shares` table and a second RLS policy allowing `select` for shared users.
 3. Add an `api.change_password` function (SECURITY DEFINER; verify the old password first).
 4. Write tests for your RLS policies with [pgTAP](https://pgtap.org/).
-5. Replace `db/init` with a real migration tool (dbmate or Sqitch), so you can change the
+5. Add a bank transfer to the Concurrency Lab: A→B and B→A at the same time deadlock
+   (`40P01`) unless both lock the two accounts in the same order (lowest id first).
+6. Replace `db/init` with a real migration tool (dbmate or Sqitch), so you can change the
    schema without wiping data.
 
 ## Not production-ready (on purpose)

@@ -19,6 +19,24 @@ export async function rpc(fn, args = {}, token) {
   return body;
 }
 
+// Many calls at the SAME moment, each in its own transaction on its own
+// connection (the gateway starts them together). One entry per call:
+//   { ok, result | error + code, startedAt, finishedAt }
+export async function rpcBatch(calls, token) {
+  const res = await fetch("/api/rpc-batch", {
+    method: "POST",
+    headers: { "Content-Type": "application/json", Authorization: `Bearer ${token}` },
+    body: JSON.stringify({ calls }),
+  });
+  const body = await res.json();
+  if (!res.ok) {
+    const error = new Error(body.error ?? `Request failed (${res.status})`);
+    error.status = res.status;
+    throw error;
+  }
+  return body;
+}
+
 // Realtime: the server pushes an event whenever one of OUR rows changes.
 // event = "todo" (app.todos) or "job" (app.jobs)
 export function subscribe(token, event, onChange) {

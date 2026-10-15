@@ -6,13 +6,17 @@
 //   2. hands the Authorization token to the database for that one transaction
 //   3. turns Postgres error codes into HTTP status codes
 //   4. relays LISTEN/NOTIFY messages to browsers over Server-Sent Events
+//   5. runs a batch of calls in parallel, each in its own transaction (the
+//      Concurrency Lab needs that; a browser only opens ~6 requests at once)
 // All of the actual logic lives in ../../db/init/*.sql
 // (Background jobs are run by a separate process: ../../worker)
 // =============================================================================
 import express from "express";
 import pg from "pg";
 
-const pool = new pg.Pool({ connectionString: process.env.DATABASE_URL });
+// max 25: enough connections for a 20-buyer race to really run in parallel
+// (pg's default of 10 would quietly queue half of them).
+const pool = new pg.Pool({ connectionString: process.env.DATABASE_URL, max: 25 });
 const app = express();
 app.use(express.json());
 
@@ -20,10 +24,18 @@ app.use(express.json());
 // (The database's GRANTs are the real guard: app_api can only execute api.* functions.)
 const FUNCTION_NAME = /^[a-z_][a-z0-9_]*$/;
 
-async function callRpc(fn, args, token) {
+// Isolation has to be chosen at BEGIN, before any query, so it can't be set
+// from inside the function. The client asks for it; the default is READ COMMITTED.
+const ISOLATION = {
+  "read committed": "read committed",
+  "repeatable read": "repeatable read",
+  serializable: "serializable",
+};
+
+async function callRpc(fn, args, token, isolation) {
   const client = await pool.connect();
   try {
-    await client.query("begin");
+    await client.query(`begin isolation level ${ISOLATION[isolation] ?? "read committed"}`);
     // `true` = transaction-local, so the token can't leak into the next request
     // that reuses this pooled connection.
     await client.query("select set_config('request.jwt', $1, true)", [token ?? ""]);
@@ -46,6 +58,7 @@ function httpStatusFor(code = "") {
   if (code === "42501") return 403; // insufficient_privilege
   if (code === "42883" || code === "P0002") return 404; // undefined_function / no_data_found
   if (code === "23505") return 409; // unique_violation
+  if (code === "40001" || code === "40P01") return 409; // serialization_failure / deadlock: retry
   if (code.startsWith("22") || code.startsWith("23") || code === "P0001") return 400; // bad data / rule broken
   return 500;
 }
@@ -75,6 +88,41 @@ app.post("/api/rpc/:fn", async (req, res) => {
   } catch (err) {
     sendDbError(res, err);
   }
+});
+
+// ---------- 1b. Batch: many RPCs at the same moment, one transaction each ----------
+// Body: { calls: [{ fn, args, isolation? }] }. Answers with one entry per call,
+// in order, with server timestamps so the browser can draw a timeline.
+
+app.post("/api/rpc-batch", async (req, res) => {
+  const calls = req.body?.calls;
+  if (!Array.isArray(calls) || calls.length === 0 || calls.length > 50) {
+    return res.status(400).json({ error: "calls must be an array of 1-50 items" });
+  }
+  const token = bearerToken(req);
+  const results = await Promise.all(
+    calls.map(async ({ fn, args, isolation }) => {
+      const startedAt = Date.now();
+      if (!FUNCTION_NAME.test(fn ?? "")) return { ok: false, error: "Unknown function", startedAt, finishedAt: startedAt };
+      try {
+        const result = await callRpc(fn, args, token, isolation);
+        return { ok: true, result, startedAt, finishedAt: Date.now() };
+      } catch (err) {
+        const status = httpStatusFor(err.code);
+        if (status === 500) console.error(err);
+        return {
+          ok: false,
+          status,
+          error: status === 500 ? "Internal server error" : err.message,
+          code: err.code,
+          startedAt,
+          finishedAt: Date.now(),
+        };
+      }
+    }),
+  );
+  if (results.some((r) => r.status === 401)) return res.status(401).json({ error: results.find((r) => r.status === 401).error });
+  res.json(results);
 });
 
 // ---------- 2. Realtime: LISTEN/NOTIFY -> Server-Sent Events ----------

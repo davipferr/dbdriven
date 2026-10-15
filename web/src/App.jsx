@@ -2,6 +2,7 @@ import { useCallback, useEffect, useState } from "react";
 import { rpc, subscribe } from "./api.js";
 import Jobs from "./Jobs.jsx";
 import QueryBuilder from "./QueryBuilder.jsx";
+import Concurrency from "./Concurrency.jsx";
 
 const TOKEN_KEY = "dbdriven.token";
 
@@ -37,6 +38,7 @@ export default function App() {
           <button className={tab === "todos" ? "active" : ""} onClick={() => setTab("todos")}>Todos</button>
           <button className={tab === "jobs" ? "active" : ""} onClick={() => setTab("jobs")}>Jobs</button>
           <button className={tab === "query" ? "active" : ""} onClick={() => setTab("query")}>Query</button>
+          <button className={tab === "lab" ? "active" : ""} onClick={() => setTab("lab")}>Concurrency</button>
         </nav>
         <span>
           <span className="muted">{user.email}</span>
@@ -46,6 +48,7 @@ export default function App() {
       {tab === "todos" && <Todos token={token} onUnauthorized={logout} />}
       {tab === "jobs" && <Jobs token={token} onUnauthorized={logout} />}
       {tab === "query" && <QueryBuilder token={token} onUnauthorized={logout} />}
+      {tab === "lab" && <Concurrency token={token} onUnauthorized={logout} />}
     </main>
   );
 }
